@@ -5,6 +5,7 @@ from scipy.ndimage.filters import maximum_filter
 from scipy.ndimage import map_coordinates, gaussian_filter
 from scipy.ndimage import convolve
 import cv2
+from scipy.ndimage import map_coordinates, gaussian_filter
 from scipy.ndimage.measurements import label, center_of_mass
 from scipy.ndimage.morphology import generate_binary_structure
 import sol4_utils
@@ -36,6 +37,7 @@ def harris_corner_detector(im):
 
   # Step 3: Blur the products using cv2.GaussianBlur with kernel_size=3
   kernel_size = 3
+
   Ix2 = cv2.GaussianBlur(Ix2, (kernel_size, kernel_size), 0)
   Iy2 = cv2.GaussianBlur(Iy2, (kernel_size, kernel_size), 0)
   IxIy = cv2.GaussianBlur(IxIy, (kernel_size, kernel_size), 0)
@@ -229,7 +231,34 @@ def apply_homography(pos1, H12):
   :param H12: A 3x3 homography matrix.
   :return: An array with the same shape as pos1 with [x,y] point coordinates obtained from transforming pos1 using H12.
   """
-  pass
+  N = pos1.shape[0]
+
+  # Convert to homogeneous coordinates
+  # pos1 is (N, 2) with [x, y] coordinates
+  # Add a column of ones to make it (N, 3) with [x, y, 1]
+  ones = np.ones((N, 1))
+  pos1_homogeneous = np.hstack([pos1, ones])  # Shape: (N, 3)
+
+  # Apply homography: p2_homo = H12 @ p1_homo^T
+  # Transpose to get (3, N), apply H, then transpose back
+  pos2_homogeneous = (H12 @ pos1_homogeneous.T).T  # Shape: (N, 3)
+
+  # Convert back to inhomogeneous coordinates
+  # Divide by the third coordinate (z) to normalize
+  # Handle the case where z might be 0 (point at infinity)
+  z_coords = pos2_homogeneous[:, 2]
+
+  # Avoid division by zero
+  valid_mask = np.abs(z_coords) > 1e-10
+  pos2 = np.zeros_like(pos1)
+
+  pos2[valid_mask, 0] = pos2_homogeneous[valid_mask, 0] / z_coords[valid_mask]  # x
+  pos2[valid_mask, 1] = pos2_homogeneous[valid_mask, 1] / z_coords[valid_mask]  # y
+
+  # Points with z=0 are at infinity, keep them as zeros or mark as invalid
+  # The RANSAC process will treat these as outliers
+
+  return pos2
 
 
 def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=False):
@@ -245,7 +274,52 @@ def ransac_homography(points1, points2, num_iter, inlier_tol, translation_only=F
               2) An Array with shape (S,) where S is the number of inliers,
                   containing the indices in pos1/pos2 of the maximal set of inlier matches found.
   """
-  pass
+  N = points1.shape[0]
+
+  # Determine number of points needed for estimation
+  if translation_only:
+      n_points = 1  # Only need 1 point pair for translation
+  else:
+      n_points = 2  # Need 2 point pairs for rigid transform (rotation + translation)
+
+  if N < n_points:
+      # Not enough points
+      return [np.eye(3), np.array([])]
+
+  best_inliers = []
+  best_homography = np.eye(3)
+
+  for iteration in range(num_iter):
+      # Step 1: Randomly sample point pairs
+      sample_indices = np.random.choice(N, n_points, replace=False)
+      sample_points1 = points1[sample_indices]
+      sample_points2 = points2[sample_indices]
+
+      # Step 2: Compute homography from samples
+      H12 = estimate_rigid_transform(sample_points1, sample_points2, translation_only)
+
+      # Step 3: Transform all points and compute distances
+      transformed_points = apply_homography(points1, H12)
+
+      # Compute squared Euclidean distances
+      distances_squared = np.sum((transformed_points - points2) ** 2, axis=1)
+
+      # Step 4: Find inliers
+      inlier_mask = distances_squared < inlier_tol ** 2
+      inlier_indices = np.where(inlier_mask)[0]
+
+      # Step 5: Keep track of best set
+      if len(inlier_indices) > len(best_inliers):
+          best_inliers = inlier_indices
+          best_homography = H12
+
+  # Step 6: Recompute homography using all inliers
+  if len(best_inliers) >= n_points:
+      inlier_points1 = points1[best_inliers]
+      inlier_points2 = points2[best_inliers]
+      best_homography = estimate_rigid_transform(inlier_points1, inlier_points2, translation_only)
+
+  return [best_homography, best_inliers]
 
 
 def display_matches(im1, im2, points1, points2, inliers):
@@ -257,9 +331,38 @@ def display_matches(im1, im2, points1, points2, inliers):
   :param pos2: An aray shape (N,2), containing N rows of [x,y] coordinates of matched points in im2.
   :param inliers: An array with shape (S,) of inlier matches.
   """
-  pass
+  #Create horizontally concatenated image
+  h1, w1 = im1.shape
+  h2, w2 = im2.shape
+  h = max(h1, h2)
+  combined_image = np.zeros((h, w1 + w2))
+  combined_image[:h1, :w1] = im1
+  combined_image[:h2, w1:] = im2
 
+  # Display the combined image
+  plt.figure(figsize=(15, 8))
+  plt.imshow(combined_image, cmap='gray')
 
+  # Plot all matched points as red dots
+  plt.scatter(points1[:, 0], points1[:, 1], c='r', s=10, marker='o')
+  plt.scatter(points2[:, 0] + w1, points2[:, 1], c='r', s=10, marker='o')
+
+  # Draw lines between matches
+  # Outliers in blue, inliers in yellow
+  for i in range(len(points1)):
+      x_coords = [points1[i, 0], points2[i, 0] + w1]
+      y_coords = [points1[i, 1], points2[i, 1]]
+
+      if i in inliers:
+          # Inlier - yellow line
+          plt.plot(x_coords, y_coords, 'y-', linewidth=0.5, alpha=0.7)
+      else:
+          # Outlier - blue line
+          plt.plot(x_coords, y_coords, 'b-', linewidth=0.3, alpha=0.5)
+
+  plt.title(f'Feature Matches - {len(inliers)} inliers (yellow) / {len(points1) - len(inliers)} outliers (blue)')
+  plt.axis('off')
+  plt.show()
 
 def accumulate_homographies(H_succesive, m):
   """
@@ -397,7 +500,7 @@ def spread_out_corners(im, m, n, radius):
       sub_corners += np.array([x_bound[i], y_bound[j]])[np.newaxis,:]
       corners.append(sub_corners)
   corners = np.vstack(corners)
-  legit = ((corners[:,0]>radius) & (corners[:,0]<im.shape[1]-radius) & 
+  legit = ((corners[:,0]>radius) & (corners[:,0]<im.shape[1]-radius) &
            (corners[:,1]>radius) & (corners[:,1]<im.shape[0]-radius))
   ret = corners[legit,:]
   return ret
