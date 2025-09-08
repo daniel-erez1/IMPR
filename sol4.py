@@ -70,7 +70,49 @@ def sample_descriptor(im, pos, desc_rad):
   :param desc_rad: "Radius" of descriptors to compute.
   :return: A 3D array with shape (N,K,K) containing the ith descriptor at desc[i,:,:].
   """
-  pass
+  K = 1 + 2 * desc_rad  # Descriptor size (7x7 for desc_rad=3)
+  N = pos.shape[0]  # Number of feature points
+  descriptors = np.zeros((N, K, K))
+
+  # Create relative coordinates for the patch
+  # We want a KxK grid centered at (0,0)
+  patch_range = np.arange(-desc_rad, desc_rad + 1)
+  patch_y, patch_x = np.meshgrid(patch_range, patch_range, indexing='ij')
+
+  for i in range(N):
+      # Get the center point coordinates
+      # pos is in (x, y) format
+      center_x, center_y = pos[i, 0], pos[i, 1]
+
+      # Calculate absolute coordinates for sampling
+      # These may be sub-pixel coordinates
+      sample_x = patch_x.flatten() + center_x
+      sample_y = patch_y.flatten() + center_y
+
+      # Stack coordinates for map_coordinates
+      # map_coordinates expects (row, col) format, so we need (y, x)
+      coords = np.vstack([sample_y, sample_x])
+
+      # Sample using bilinear interpolation
+      sampled_values = map_coordinates(im, coords, order=1, prefilter=False)
+
+      # Reshape to KxK
+      descriptor = sampled_values.reshape(K, K)
+
+      # Normalize the descriptor
+      mean_val = np.mean(descriptor)
+      descriptor_centered = descriptor - mean_val
+      norm = np.linalg.norm(descriptor_centered)
+
+      if norm > 0:
+          descriptor = descriptor_centered / norm
+      else:
+          # If norm is zero, return zero descriptor
+          descriptor = np.zeros((K, K))
+
+      descriptors[i] = descriptor
+
+  return descriptors
   
 
 def find_features(pyr):
@@ -82,7 +124,21 @@ def find_features(pyr):
                  These coordinates are provided at the pyramid level pyr[0].
               2) A feature descriptor array with shape (N,K,K)
   """
-  pass
+  # Detect features at the original resolution (pyr[0])
+  # Use spread_out_corners for better spatial distribution
+  feature_points = spread_out_corners(pyr[0], m=7, n=7, radius=16)
+
+  # Convert feature coordinates from level 0 to level 2
+  # According to equation (1) in the PDF: p_lj = 2^(li-lj) * p_li
+  # From level 0 to level 2: p_l2 = 2^(0-2) * p_l0 = p_l0 / 4
+  feature_points_l2 = feature_points / 4.0
+
+  # Sample descriptors at level 2 of the pyramid
+  # Using desc_rad=3 to get 7x7 descriptors
+  descriptors = sample_descriptor(pyr[2], feature_points_l2, desc_rad=3)
+
+  # Return features at original resolution (pyr[0]) and their descriptors
+  return [feature_points, descriptors]
 
 
 def match_features(desc1, desc2, min_score):
