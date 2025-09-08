@@ -11,22 +11,13 @@ import cv2
 from scipy.ndimage.measurements import label, center_of_mass
 from scipy.ndimage.morphology import generate_binary_structure
 import sol4_utils
-import shutil
 import os
 from tqdm import tqdm
-
-import numpy as np
-import os
-import matplotlib.pyplot as plt
-
 from scipy.ndimage.morphology import generate_binary_structure
 from scipy.ndimage.filters import maximum_filter
 from scipy.ndimage import label, center_of_mass
 import shutil
 from imageio import imwrite
-
-import sol4_utils
-
 def harris_corner_detector(im):
   """
   Detects harris corners.
@@ -34,7 +25,41 @@ def harris_corner_detector(im):
   :param im: A 2D array representing an image.
   :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.  
   """
-  pass
+  # Step 1: Compute derivatives using [1, 0, -1] filters
+  dx_filter = np.array([[1, 0, -1]], dtype=np.float32)  # Horizontal derivative filter
+  dy_filter = dx_filter.T  # Vertical derivative filter
+
+  Ix = convolve(im.astype(np.float32), dx_filter)
+  Iy = convolve(im.astype(np.float32), dy_filter)
+
+  # Step 2: Compute products of derivatives
+  Ix2 = Ix * Ix
+  Iy2 = Iy * Iy
+  IxIy = Ix * Iy
+
+  # Step 3: Blur the products using cv2.GaussianBlur with kernel_size=3
+  kernel_size = 3
+  Ix2 = cv2.GaussianBlur(Ix2, (kernel_size, kernel_size), 0)
+  Iy2 = cv2.GaussianBlur(Iy2, (kernel_size, kernel_size), 0)
+  IxIy = cv2.GaussianBlur(IxIy, (kernel_size, kernel_size), 0)
+
+  # Step 4: Compute Harris response
+  # R = det(M) - k * trace(M)^2
+  # where M = [[Ix2, IxIy], [IxIy, Iy2]]
+  k = 0.04
+  det_M = Ix2 * Iy2 - IxIy * IxIy
+  trace_M = Ix2 + Iy2
+  R = det_M - k * (trace_M ** 2)
+
+  # Step 5: Find local maxima using the existing non_maximum_suppression
+  corner_mask = non_maximum_suppression(R)
+
+  # Step 6: Extract corner coordinates
+  # IMPORTANT: np.where returns (rows, cols) but we need (x, y) = (cols, rows)
+  corners_rows, corners_cols = np.where(corner_mask)
+  corners = np.stack([corners_cols, corners_rows], axis=1)  # [x, y] format
+
+  return corners
   
 
 def sample_descriptor(im, pos, desc_rad):
@@ -172,7 +197,7 @@ def filter_homographies_with_translation(homographies, minimum_right_translation
     if homographies[i][0,-1] - last > minimum_right_translation:
       translation_over_thresh.append(i)
       last = homographies[i][0,-1]
-  return np.array(translation_over_thresh).astype(np.int)
+  return np.array(translation_over_thresh).astype(int)
 
 
 def estimate_rigid_transform(points1, points2, translation_only=False):
@@ -221,7 +246,7 @@ def non_maximum_suppression(image):
   # Erode areas to single points.
   lbs, num = label(local_max)
   centers = center_of_mass(local_max, lbs, np.arange(num)+1)
-  centers = np.stack(centers).round().astype(np.int)
+  centers = np.stack(centers).round().astype(int)
   ret = np.zeros_like(image, dtype=np.bool)
   ret[centers[:,0], centers[:,1]] = True
 
@@ -237,9 +262,9 @@ def spread_out_corners(im, m, n, radius):
   :param radius: Minimal distance of corner points from the boundary of the image.
   :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.
   """
-  corners = [np.empty((0,2), dtype=np.int)]
-  x_bound = np.linspace(0, im.shape[1], n+1, dtype=np.int)
-  y_bound = np.linspace(0, im.shape[0], m+1, dtype=np.int)
+  corners = [np.empty((0,2), dtype=int)]
+  x_bound = np.linspace(0, im.shape[1], n+1, dtype=int)
+  y_bound = np.linspace(0, im.shape[0], m+1, dtype=int)
   for i in range(n):
     for j in range(m):
       # Use Harris detector on every sub image.
@@ -340,7 +365,7 @@ class PanoramicVideoGenerator:
     global_offset = np.min(self.bounding_boxes, axis=(0, 1))
     self.bounding_boxes -= global_offset
 
-    slice_centers = np.linspace(0, self.w, number_of_panoramas + 2, endpoint=True, dtype=np.int)[1:-1]
+    slice_centers = np.linspace(0, self.w, number_of_panoramas + 2, endpoint=True, dtype=int)[1:-1]
     warped_slice_centers = np.zeros((number_of_panoramas, self.frames_for_panoramas.size))
     # every slice is a different panorama, it indicates the slices of the input images from which the panorama
     # will be concatenated
@@ -351,21 +376,21 @@ class PanoramicVideoGenerator:
       # we are actually only interested in the x coordinate of each slice center in the panoramas' coordinate system
       warped_slice_centers[i] = np.array(warped_centers)[:, :, 0].squeeze() - global_offset[0]
 
-    panorama_size = np.max(self.bounding_boxes, axis=(0, 1)).astype(np.int) + 1
+    panorama_size = np.max(self.bounding_boxes, axis=(0, 1)).astype(int) + 1
 
     # boundary between input images in the panorama
     x_strip_boundary = ((warped_slice_centers[:, :-1] + warped_slice_centers[:, 1:]) / 2)
     x_strip_boundary = np.hstack([np.zeros((number_of_panoramas, 1)),
                                   x_strip_boundary,
                                   np.ones((number_of_panoramas, 1)) * panorama_size[0]])
-    x_strip_boundary = x_strip_boundary.round().astype(np.int)
+    x_strip_boundary = x_strip_boundary.round().astype(int)
 
     self.panoramas = np.zeros((number_of_panoramas, panorama_size[1], panorama_size[0], 3), dtype=np.float64)
     for i, frame_index in enumerate(self.frames_for_panoramas):
       # warp every input image once, and populate all panoramas
       image = sol4_utils.read_image(self.files[frame_index], 2)
       warped_image = warp_image(image, self.homographies[i])
-      x_offset, y_offset = self.bounding_boxes[i][0].astype(np.int)
+      x_offset, y_offset = self.bounding_boxes[i][0].astype(int)
       y_bottom = y_offset + warped_image.shape[0]
 
       for panorama_index in range(number_of_panoramas):
