@@ -1,6 +1,3 @@
-# Initial code for ex4.
-# You may change this code, but keep the functions' signatures
-# You can also split the code to multiple files as long as this file's API is unchanged 
 import numpy as np
 from typing import List, Tuple
 import matplotlib.pyplot as plt
@@ -151,7 +148,78 @@ def match_features(desc1, desc2, min_score):
               1) An array with shape (M,) and dtype int of matching indices in desc1.
               2) An array with shape (M,) and dtype int of matching indices in desc2.
   """
-  pass
+  N1 = desc1.shape[0]
+  N2 = desc2.shape[0]
+
+  # Flatten descriptors for dot product computation
+  # Shape: (N1, K*K) and (N2, K*K)
+  desc1_flat = desc1.reshape(N1, -1)
+  desc2_flat = desc2.reshape(N2, -1)
+
+  # Compute all pairwise dot products (match scores)
+  # S[i,j] = dot product between desc1[i] and desc2[j]
+  # Shape: (N1, N2)
+  S = desc1_flat @ desc2_flat.T
+
+  # Lists to store matching indices
+  matches_ind1 = []
+  matches_ind2 = []
+
+  # For each descriptor in desc1, check if it has a valid match in desc2
+  for j in range(N1):
+      # Get scores for descriptor j from image 1 with all descriptors in image 2
+      scores_j = S[j, :]
+
+      # Find the best and second best matches in desc2
+      if N2 >= 2:
+          # Get indices of top 2 scores
+          top2_indices = np.argpartition(scores_j, -2)[-2:]
+          top2_indices = top2_indices[np.argsort(scores_j[top2_indices])[::-1]]
+          best_k = top2_indices[0]
+          second_best_score = scores_j[top2_indices[1]]
+      elif N2 == 1:
+          best_k = 0
+          second_best_score = -np.inf
+      else:
+          continue
+
+      # Score between desc1[j] and desc2[best_k]
+      score_jk = scores_j[best_k]
+
+      # Check condition 1: S_jk >= second_best_score in row j
+      # (This is automatically true since best_k is the argmax)
+
+      # Check condition 2: S_jk >= second_best_score in column best_k
+      scores_k = S[:, best_k]  # All scores for desc2[best_k]
+
+      if N1 >= 2:
+          # Get indices of top 2 scores in column
+          top2_col_indices = np.argpartition(scores_k, -2)[-2:]
+          top2_col_indices = top2_col_indices[np.argsort(scores_k[top2_col_indices])[::-1]]
+
+          # Check if j is in the top 2 matches for descriptor best_k
+          if j not in top2_col_indices:
+              continue
+
+          # Get the second best score in the column
+          if top2_col_indices[0] == j:
+              second_best_col_score = scores_k[top2_col_indices[1]]
+          else:
+              second_best_col_score = scores_k[top2_col_indices[0]]
+      else:
+          second_best_col_score = -np.inf
+
+      # Check condition 3: Score must be greater than min_score
+      if score_jk > min_score:
+          # All conditions satisfied - add this match
+          matches_ind1.append(j)
+          matches_ind2.append(best_k)
+
+  # Convert to numpy arrays
+  matches_ind1 = np.array(matches_ind1, dtype=int)
+  matches_ind2 = np.array(matches_ind2, dtype=int)
+
+  return [matches_ind1, matches_ind2]
 
 
 def apply_homography(pos1, H12):
