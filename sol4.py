@@ -23,12 +23,14 @@ def harris_corner_detector(im):
   :param im: A 2D array representing an image.
   :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.  
   """
+  # im = im.astype(np.float32) / 255.0
+
   # Step 1: Compute derivatives using [1, 0, -1] filters
   dx_filter = np.array([[1, 0, -1]], dtype=np.float32)  # Horizontal derivative filter
   dy_filter = dx_filter.T  # Vertical derivative filter
 
-  Ix = convolve(im.astype(np.float32), dx_filter)
-  Iy = convolve(im.astype(np.float32), dy_filter)
+  Ix = convolve(im, dx_filter)
+  Iy = convolve(im, dy_filter)
 
   # Step 2: Compute products of derivatives
   Ix2 = Ix * Ix
@@ -37,10 +39,13 @@ def harris_corner_detector(im):
 
   # Step 3: Blur the products using cv2.GaussianBlur with kernel_size=3
   kernel_size = 3
+  Ix2 = gaussian_filter(Ix2, sigma=1)
+  Iy2 = gaussian_filter(Iy2, sigma=1)
+  IxIy = gaussian_filter(IxIy, sigma=1)
 
-  Ix2 = cv2.GaussianBlur(Ix2, (kernel_size, kernel_size), 0)
-  Iy2 = cv2.GaussianBlur(Iy2, (kernel_size, kernel_size), 0)
-  IxIy = cv2.GaussianBlur(IxIy, (kernel_size, kernel_size), 0)
+  # Ix2 = cv2.GaussianBlur(Ix2, (kernel_size, kernel_size), 0)
+  # Iy2 = cv2.GaussianBlur(Iy2, (kernel_size, kernel_size), 0)
+  # IxIy = cv2.GaussianBlur(IxIy, (kernel_size, kernel_size), 0)
 
   # Step 4: Compute Harris response
   # R = det(M) - k * trace(M)^2
@@ -125,12 +130,12 @@ def find_features(pyr):
   """
   # Detect features at the original resolution (pyr[0])
   # Use spread_out_corners for better spatial distribution
-  feature_points = spread_out_corners(pyr[0], m=7, n=7, radius=16)
-
+  # feature_points = spread_out_corners(pyr[0], m=7, n=7, radius=16) #TODO: turned off spread out
+  feature_points = harris_corner_detector(pyr[0])
   # Convert feature coordinates from level 0 to level 2
   # According to equation (1) in the PDF: p_lj = 2^(li-lj) * p_li
   # From level 0 to level 2: p_l2 = 2^(0-2) * p_l0 = p_l0 / 4
-  feature_points_l2 = feature_points / 4.0
+  feature_points_l2 = feature_points /4.0
 
   # Sample descriptors at level 2 of the pyramid
   # Using desc_rad=3 to get 7x7 descriptors
@@ -460,50 +465,106 @@ def estimate_rigid_transform(points1, points2, translation_only=False):
 
 
 def non_maximum_suppression(image):
-  """
-  Finds local maximas of an image.
-  :param image: A 2D array representing an image.
-  :return: A boolean array with the same shape as the input image, where True indicates local maximum.
-  """
-  # Find local maximas.
-  neighborhood = generate_binary_structure(2,2)
-  local_max = maximum_filter(image, footprint=neighborhood)==image
-  local_max[image<(image.max()*0.1)] = False
+    """
+    Alternative implementation matching main.py's approach.
+    Finds local maximas of an image using a simpler window-based method.
+    :param image: A 2D array representing an image.
+    :return: A boolean array with the same shape as the input image, where True indicates local maximum.
+    """
+    from scipy.ndimage.filters import maximum_filter
 
-  # Erode areas to single points.
-  lbs, num = label(local_max)
-  centers = center_of_mass(local_max, lbs, np.arange(num)+1)
-  centers = np.stack(centers).round().astype(int)
-  ret = np.zeros_like(image, dtype=np.bool)
-  ret[centers[:,0], centers[:,1]] = True
+    # Window size for local maximum detection
+    window_size = 3
 
-  return ret
+    # Threshold relative to maximum response
+    threshold = 0.1
+    R_max = np.max(image)
+
+    # Apply threshold
+    corner_candidates = (image > threshold * R_max)
+
+    # Create footprint for non-maximum suppression
+    footprint = np.ones((window_size, window_size))
+
+    # Find local maxima
+    local_max = (image == maximum_filter(image, footprint=footprint))
+
+    # Combine threshold and local maxima conditions
+    corners_mask = corner_candidates & local_max
+
+    return corners_mask
+
+
+# def non_maximum_suppression(image):
+#   """
+#   Finds local maximas of an image.
+#   :param image: A 2D array representing an image.
+#   :return: A boolean array with the same shape as the input image, where True indicates local maximum.
+#   """
+#   # Find local maximas.
+#   neighborhood = generate_binary_structure(2,2)
+#   local_max = maximum_filter(image, footprint=neighborhood)==image
+#   local_max[image<(image.max()*0.1)] = False
+#
+#   # Erode areas to single points.
+#   lbs, num = label(local_max)
+#   centers = center_of_mass(local_max, lbs, np.arange(num)+1)
+#   centers = np.stack(centers).round().astype(int)
+#   ret = np.zeros_like(image, dtype=np.bool)
+#   ret[centers[:,0], centers[:,1]] = True
+#
+#   return ret
 
 
 def spread_out_corners(im, m, n, radius):
-  """
-  Splits the image im to m by n rectangles and uses harris_corner_detector on each.
-  :param im: A 2D array representing an image.
-  :param m: Vertical number of rectangles.
-  :param n: Horizontal number of rectangles.
-  :param radius: Minimal distance of corner points from the boundary of the image.
-  :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.
-  """
-  corners = [np.empty((0,2), dtype=int)]
-  x_bound = np.linspace(0, im.shape[1], n+1, dtype=int)
-  y_bound = np.linspace(0, im.shape[0], m+1, dtype=int)
-  for i in range(n):
-    for j in range(m):
-      # Use Harris detector on every sub image.
-      sub_im = im[y_bound[j]:y_bound[j+1], x_bound[i]:x_bound[i+1]]
-      sub_corners = harris_corner_detector(sub_im)
-      sub_corners += np.array([x_bound[i], y_bound[j]])[np.newaxis,:]
-      corners.append(sub_corners)
-  corners = np.vstack(corners)
-  legit = ((corners[:,0]>radius) & (corners[:,0]<im.shape[1]-radius) &
-           (corners[:,1]>radius) & (corners[:,1]<im.shape[0]-radius))
-  ret = corners[legit,:]
-  return ret
+    """
+    Spreads out corners across the image.
+    :param im: A 2D array representing an image.
+    :param m: The number of rows to divide the image into.
+    :param n: The number of columns to divide the image into.
+    :param radius: The minimal distance of corner points from the boundary of the image.
+    :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.
+    """
+    corners = [np.empty((0, 2), dtype=np.int64)]
+    x_bound = np.linspace(radius, im.shape[1] - radius, n + 1, dtype=np.int64)
+    y_bound = np.linspace(radius, im.shape[0] - radius, m + 1, dtype=np.int64)
+    for i in range(n):
+        for j in range(m):
+            # Use Harris corner detector on the window
+            window = im[y_bound[j]:y_bound[j + 1], x_bound[i]:x_bound[i + 1]]
+            window_corners = harris_corner_detector(window)
+
+            # Adjust coordinates to original image space
+            window_corners = window_corners + np.array([x_bound[i], y_bound[j]])[np.newaxis, :]
+            corners.append(window_corners)
+
+    corners = np.vstack(corners)
+    return corners
+
+# def spread_out_corners(im, m, n, radius):
+#   """
+#   Splits the image im to m by n rectangles and uses harris_corner_detector on each.
+#   :param im: A 2D array representing an image.
+#   :param m: Vertical number of rectangles.
+#   :param n: Horizontal number of rectangles.
+#   :param radius: Minimal distance of corner points from the boundary of the image.
+#   :return: An array with shape (N,2), where ret[i,:] are the [x,y] coordinates of the ith corner points.
+#   """
+#   corners = [np.empty((0,2), dtype=int)]
+#   x_bound = np.linspace(0, im.shape[1], n+1, dtype=int)
+#   y_bound = np.linspace(0, im.shape[0], m+1, dtype=int)
+#   for i in range(n):
+#     for j in range(m):
+#       # Use Harris detector on every sub image.
+#       sub_im = im[y_bound[j]:y_bound[j+1], x_bound[i]:x_bound[i+1]]
+#       sub_corners = harris_corner_detector(sub_im)
+#       sub_corners += np.array([x_bound[i], y_bound[j]])[np.newaxis,:]
+#       corners.append(sub_corners)
+#   corners = np.vstack(corners)
+#   legit = ((corners[:,0]>radius) & (corners[:,0]<im.shape[1]-radius) &
+#            (corners[:,1]>radius) & (corners[:,1]<im.shape[0]-radius))
+#   ret = corners[legit,:]
+#   return ret
 
 
 class PanoramicVideoGenerator:
